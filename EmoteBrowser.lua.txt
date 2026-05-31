@@ -1,0 +1,695 @@
+-- Emote Browser GUI for Delta
+-- Loads all emotes from EmoteSniper.json, search, preview, speed control, freeze
+
+if _G.EmoteBrowserRunning then return end
+_G.EmoteBrowserRunning = true
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+
+-- State
+local allEmotes = {}
+local filteredEmotes = {}
+local currentPage = 1
+local EMOTES_PER_PAGE = 20
+local currentTrack = nil
+local freezeEnabled = false
+local emoteSpeed = 1.0
+local selectedEmote = nil
+local guiOpen = true
+
+-- ─────────────────────────────────────────
+-- PLAY EMOTE
+-- ─────────────────────────────────────────
+local function stopCurrentEmote()
+    if currentTrack and currentTrack.IsPlaying then
+        currentTrack:Stop()
+    end
+    currentTrack = nil
+end
+
+local function resolveAnimId(id)
+    -- Try to get the actual animation id from emote asset
+    local ok, objects = pcall(function()
+        return game:GetObjects("rbxassetid://" .. tostring(id))
+    end)
+    if ok and objects then
+        local function findAnim(obj)
+            if obj:IsA("Animation") then
+                local raw = obj.AnimationId:gsub("rbxassetid://",""):gsub("http://www.roblox.com/asset/%?id=","")
+                local n = tonumber(raw)
+                if n and n > 0 then return n end
+            end
+            for _, c in ipairs(obj:GetChildren()) do
+                local f = findAnim(c)
+                if f then return f end
+            end
+        end
+        for _, obj in ipairs(objects) do
+            pcall(function() obj.Parent = workspace end)
+            local found = findAnim(obj)
+            task.delay(1, function() pcall(function() obj:Destroy() end) end)
+            if found then return found end
+        end
+    end
+    return tonumber(id)
+end
+
+local function playEmote(emote)
+    local char = player.Character
+    if not char then return end
+    local hum = char:FindFirstChild("Humanoid")
+    if not hum then return end
+    local animator = hum:FindFirstChild("Animator")
+    if not animator then return end
+
+    stopCurrentEmote()
+
+    task.spawn(function()
+        local animId = resolveAnimId(emote.id)
+        if not animId then return end
+
+        local anim = Instance.new("Animation")
+        anim.AnimationId = "rbxassetid://" .. tostring(animId)
+
+        local ok, track = pcall(function()
+            return animator:LoadAnimation(anim)
+        end)
+        if not ok or not track then return end
+
+        track:Play()
+        track:AdjustSpeed(emoteSpeed)
+        currentTrack = track
+
+        if freezeEnabled then
+            local origWalk = hum.WalkSpeed
+            local origJump = hum.JumpPower
+            hum.WalkSpeed = 0
+            hum.JumpPower = 0
+            track.Stopped:Connect(function()
+                if freezeEnabled then
+                    hum.WalkSpeed = origWalk
+                    hum.JumpPower = origJump
+                end
+            end)
+        end
+    end)
+end
+
+-- ─────────────────────────────────────────
+-- BUILD GUI
+-- ─────────────────────────────────────────
+local function makeCorner(parent, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or 6)
+    c.Parent = parent
+end
+
+local function makeStroke(parent, color, thickness)
+    local s = Instance.new("UIStroke")
+    s.Color = color or Color3.fromRGB(40, 55, 70)
+    s.Thickness = thickness or 1
+    s.Parent = parent
+end
+
+-- Destroy old GUI if reloaded
+pcall(function()
+    if CoreGui:FindFirstChild("EmoteBrowserGUI") then
+        CoreGui.EmoteBrowserGUI:Destroy()
+    end
+end)
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "EmoteBrowserGUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() screenGui.Parent = CoreGui end)
+if not screenGui.Parent then screenGui.Parent = player.PlayerGui end
+
+-- Toggle button (always visible)
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(0, 110, 0, 34)
+toggleBtn.Position = UDim2.new(0, 12, 0.5, -17)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(10, 18, 28)
+toggleBtn.TextColor3 = Color3.fromRGB(0, 220, 255)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 13
+toggleBtn.Text = "≡  EMOTES"
+toggleBtn.ZIndex = 10
+toggleBtn.Parent = screenGui
+makeCorner(toggleBtn, 6)
+makeStroke(toggleBtn, Color3.fromRGB(0, 180, 220), 1.5)
+
+-- Main frame
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 500, 0, 540)
+mainFrame.Position = UDim2.new(0.5, -250, 0.5, -270)
+mainFrame.BackgroundColor3 = Color3.fromRGB(8, 13, 20)
+mainFrame.BorderSizePixel = 0
+mainFrame.ZIndex = 5
+mainFrame.Parent = screenGui
+makeCorner(mainFrame, 10)
+makeStroke(mainFrame, Color3.fromRGB(20, 40, 60), 1.5)
+
+-- Title bar
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 40)
+titleBar.BackgroundColor3 = Color3.fromRGB(10, 20, 32)
+titleBar.BorderSizePixel = 0
+titleBar.ZIndex = 6
+titleBar.Parent = mainFrame
+makeCorner(titleBar, 10)
+
+-- fix bottom corners of title bar
+local titleBarFix = Instance.new("Frame")
+titleBarFix.Size = UDim2.new(1, 0, 0.5, 0)
+titleBarFix.Position = UDim2.new(0, 0, 0.5, 0)
+titleBarFix.BackgroundColor3 = Color3.fromRGB(10, 20, 32)
+titleBarFix.BorderSizePixel = 0
+titleBarFix.ZIndex = 6
+titleBarFix.Parent = titleBar
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -80, 1, 0)
+titleLabel.Position = UDim2.new(0, 14, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.TextColor3 = Color3.fromRGB(0, 220, 255)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 15
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Text = "EMOTE BROWSER"
+titleLabel.ZIndex = 7
+titleLabel.Parent = titleBar
+
+local countLabel = Instance.new("TextLabel")
+countLabel.Size = UDim2.new(0, 120, 1, 0)
+countLabel.Position = UDim2.new(0, 150, 0, 0)
+countLabel.BackgroundTransparency = 1
+countLabel.TextColor3 = Color3.fromRGB(60, 100, 130)
+countLabel.Font = Enum.Font.Gotham
+countLabel.TextSize = 11
+countLabel.TextXAlignment = Enum.TextXAlignment.Left
+countLabel.Text = "loading..."
+countLabel.ZIndex = 7
+countLabel.Parent = titleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 28, 0, 28)
+closeBtn.Position = UDim2.new(1, -34, 0.5, -14)
+closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 60)
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 14
+closeBtn.Text = "✕"
+closeBtn.ZIndex = 8
+closeBtn.Parent = titleBar
+makeCorner(closeBtn, 5)
+
+-- Search bar
+local searchFrame = Instance.new("Frame")
+searchFrame.Size = UDim2.new(1, -20, 0, 32)
+searchFrame.Position = UDim2.new(0, 10, 0, 48)
+searchFrame.BackgroundColor3 = Color3.fromRGB(13, 22, 34)
+searchFrame.BorderSizePixel = 0
+searchFrame.ZIndex = 6
+searchFrame.Parent = mainFrame
+makeCorner(searchFrame, 6)
+makeStroke(searchFrame, Color3.fromRGB(20, 50, 75), 1)
+
+local searchBox = Instance.new("TextBox")
+searchBox.Size = UDim2.new(1, -16, 1, 0)
+searchBox.Position = UDim2.new(0, 8, 0, 0)
+searchBox.BackgroundTransparency = 1
+searchBox.TextColor3 = Color3.fromRGB(200, 220, 240)
+searchBox.PlaceholderText = "🔍  Search emotes..."
+searchBox.PlaceholderColor3 = Color3.fromRGB(60, 90, 110)
+searchBox.Font = Enum.Font.Gotham
+searchBox.TextSize = 13
+searchBox.TextXAlignment = Enum.TextXAlignment.Left
+searchBox.ClearTextOnFocus = false
+searchBox.ZIndex = 7
+searchBox.Parent = searchFrame
+
+-- Controls row (speed + freeze)
+local controlsFrame = Instance.new("Frame")
+controlsFrame.Size = UDim2.new(1, -20, 0, 36)
+controlsFrame.Position = UDim2.new(0, 10, 0, 88)
+controlsFrame.BackgroundTransparency = 1
+controlsFrame.ZIndex = 6
+controlsFrame.Parent = mainFrame
+
+-- Speed label
+local speedLabel = Instance.new("TextLabel")
+speedLabel.Size = UDim2.new(0, 50, 1, 0)
+speedLabel.BackgroundTransparency = 1
+speedLabel.TextColor3 = Color3.fromRGB(100, 160, 200)
+speedLabel.Font = Enum.Font.GothamBold
+speedLabel.TextSize = 11
+speedLabel.Text = "SPEED"
+speedLabel.ZIndex = 7
+speedLabel.Parent = controlsFrame
+
+-- Speed value display
+local speedValLabel = Instance.new("TextLabel")
+speedValLabel.Size = UDim2.new(0, 38, 1, 0)
+speedValLabel.Position = UDim2.new(0, 48, 0, 0)
+speedValLabel.BackgroundColor3 = Color3.fromRGB(10, 22, 35)
+speedValLabel.TextColor3 = Color3.fromRGB(255, 215, 80)
+speedValLabel.Font = Enum.Font.GothamBold
+speedValLabel.TextSize = 13
+speedValLabel.Text = "1.0x"
+speedValLabel.ZIndex = 7
+speedValLabel.Parent = controlsFrame
+makeCorner(speedValLabel, 4)
+
+-- Speed down button
+local speedDown = Instance.new("TextButton")
+speedDown.Size = UDim2.new(0, 26, 0, 26)
+speedDown.Position = UDim2.new(0, 90, 0.5, -13)
+speedDown.BackgroundColor3 = Color3.fromRGB(15, 28, 45)
+speedDown.TextColor3 = Color3.fromRGB(200, 220, 240)
+speedDown.Font = Enum.Font.GothamBold
+speedDown.TextSize = 16
+speedDown.Text = "−"
+speedDown.ZIndex = 7
+speedDown.Parent = controlsFrame
+makeCorner(speedDown, 4)
+makeStroke(speedDown, Color3.fromRGB(30, 55, 80), 1)
+
+-- Speed up button
+local speedUp = Instance.new("TextButton")
+speedUp.Size = UDim2.new(0, 26, 0, 26)
+speedUp.Position = UDim2.new(0, 120, 0.5, -13)
+speedUp.BackgroundColor3 = Color3.fromRGB(15, 28, 45)
+speedUp.TextColor3 = Color3.fromRGB(200, 220, 240)
+speedUp.Font = Enum.Font.GothamBold
+speedUp.TextSize = 16
+speedUp.Text = "+"
+speedUp.ZIndex = 7
+speedUp.Parent = controlsFrame
+makeCorner(speedUp, 4)
+makeStroke(speedUp, Color3.fromRGB(30, 55, 80), 1)
+
+-- Freeze button
+local freezeBtn = Instance.new("TextButton")
+freezeBtn.Size = UDim2.new(0, 90, 0, 26)
+freezeBtn.Position = UDim2.new(0, 158, 0.5, -13)
+freezeBtn.BackgroundColor3 = Color3.fromRGB(12, 28, 20)
+freezeBtn.TextColor3 = Color3.fromRGB(0, 210, 120)
+freezeBtn.Font = Enum.Font.GothamBold
+freezeBtn.TextSize = 11
+freezeBtn.Text = "❄  FREEZE: OFF"
+freezeBtn.ZIndex = 7
+freezeBtn.Parent = controlsFrame
+makeCorner(freezeBtn, 4)
+makeStroke(freezeBtn, Color3.fromRGB(0, 130, 80), 1)
+
+-- Stop button
+local stopBtn = Instance.new("TextButton")
+stopBtn.Size = UDim2.new(0, 60, 0, 26)
+stopBtn.Position = UDim2.new(0, 258, 0.5, -13)
+stopBtn.BackgroundColor3 = Color3.fromRGB(30, 12, 12)
+stopBtn.TextColor3 = Color3.fromRGB(255, 90, 90)
+stopBtn.Font = Enum.Font.GothamBold
+stopBtn.TextSize = 11
+stopBtn.Text = "■  STOP"
+stopBtn.ZIndex = 7
+stopBtn.Parent = controlsFrame
+makeCorner(stopBtn, 4)
+makeStroke(stopBtn, Color3.fromRGB(120, 30, 30), 1)
+
+-- Divider
+local divider = Instance.new("Frame")
+divider.Size = UDim2.new(1, -20, 0, 1)
+divider.Position = UDim2.new(0, 10, 0, 130)
+divider.BackgroundColor3 = Color3.fromRGB(20, 40, 60)
+divider.BorderSizePixel = 0
+divider.ZIndex = 6
+divider.Parent = mainFrame
+
+-- Emote list scroll frame
+local scrollFrame = Instance.new("ScrollingFrame")
+scrollFrame.Size = UDim2.new(1, -20, 0, 340)
+scrollFrame.Position = UDim2.new(0, 10, 0, 136)
+scrollFrame.BackgroundTransparency = 1
+scrollFrame.BorderSizePixel = 0
+scrollFrame.ScrollBarThickness = 4
+scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(0, 150, 200)
+scrollFrame.ZIndex = 6
+scrollFrame.Parent = mainFrame
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 4)
+listLayout.Parent = scrollFrame
+
+-- Pagination bar
+local pageBar = Instance.new("Frame")
+pageBar.Size = UDim2.new(1, -20, 0, 32)
+pageBar.Position = UDim2.new(0, 10, 1, -38)
+pageBar.BackgroundTransparency = 1
+pageBar.ZIndex = 6
+pageBar.Parent = mainFrame
+
+local prevBtn = Instance.new("TextButton")
+prevBtn.Size = UDim2.new(0, 80, 1, 0)
+prevBtn.BackgroundColor3 = Color3.fromRGB(12, 22, 35)
+prevBtn.TextColor3 = Color3.fromRGB(0, 200, 255)
+prevBtn.Font = Enum.Font.GothamBold
+prevBtn.TextSize = 12
+prevBtn.Text = "◀  PREV"
+prevBtn.ZIndex = 7
+prevBtn.Parent = pageBar
+makeCorner(prevBtn, 5)
+makeStroke(prevBtn, Color3.fromRGB(20, 55, 80), 1)
+
+local pageLabel = Instance.new("TextLabel")
+pageLabel.Size = UDim2.new(1, -176, 1, 0)
+pageLabel.Position = UDim2.new(0, 88, 0, 0)
+pageLabel.BackgroundTransparency = 1
+pageLabel.TextColor3 = Color3.fromRGB(80, 120, 150)
+pageLabel.Font = Enum.Font.Gotham
+pageLabel.TextSize = 12
+pageLabel.Text = "Page 1 / 1"
+pageLabel.ZIndex = 7
+pageLabel.Parent = pageBar
+
+local nextBtn = Instance.new("TextButton")
+nextBtn.Size = UDim2.new(0, 80, 1, 0)
+nextBtn.Position = UDim2.new(1, -80, 0, 0)
+nextBtn.BackgroundColor3 = Color3.fromRGB(12, 22, 35)
+nextBtn.TextColor3 = Color3.fromRGB(0, 200, 255)
+nextBtn.Font = Enum.Font.GothamBold
+nextBtn.TextSize = 12
+nextBtn.Text = "NEXT  ▶"
+nextBtn.ZIndex = 7
+nextBtn.Parent = pageBar
+makeCorner(nextBtn, 5)
+makeStroke(nextBtn, Color3.fromRGB(20, 55, 80), 1)
+
+-- ─────────────────────────────────────────
+-- RENDER EMOTE LIST
+-- ─────────────────────────────────────────
+local function clearList()
+    for _, child in ipairs(scrollFrame:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
+end
+
+local function renderPage()
+    clearList()
+    local totalPages = math.max(1, math.ceil(#filteredEmotes / EMOTES_PER_PAGE))
+    if currentPage > totalPages then currentPage = totalPages end
+    if currentPage < 1 then currentPage = 1 end
+
+    pageLabel.Text = "Page " .. currentPage .. " / " .. totalPages
+    prevBtn.TextTransparency = currentPage == 1 and 0.5 or 0
+    nextBtn.TextTransparency = currentPage == totalPages and 0.5 or 0
+
+    local startIdx = (currentPage - 1) * EMOTES_PER_PAGE + 1
+    local endIdx = math.min(startIdx + EMOTES_PER_PAGE - 1, #filteredEmotes)
+
+    for i = startIdx, endIdx do
+        local emote = filteredEmotes[i]
+        if not emote then break end
+
+        local row = Instance.new("TextButton")
+        row.Size = UDim2.new(1, 0, 0, 38)
+        row.BackgroundColor3 = (selectedEmote and selectedEmote.id == emote.id)
+            and Color3.fromRGB(10, 40, 60)
+            or Color3.fromRGB(11, 19, 30)
+        row.TextColor3 = Color3.fromRGB(190, 215, 235)
+        row.Font = Enum.Font.Gotham
+        row.TextSize = 13
+        row.Text = ""
+        row.LayoutOrder = i
+        row.BorderSizePixel = 0
+        row.ZIndex = 7
+        row.Parent = scrollFrame
+        makeCorner(row, 5)
+
+        if selectedEmote and selectedEmote.id == emote.id then
+            makeStroke(row, Color3.fromRGB(0, 180, 220), 1)
+        end
+
+        -- Emote name label
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Size = UDim2.new(1, -110, 1, 0)
+        nameLabel.Position = UDim2.new(0, 10, 0, 0)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.TextColor3 = Color3.fromRGB(190, 215, 235)
+        nameLabel.Font = Enum.Font.Gotham
+        nameLabel.TextSize = 13
+        nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nameLabel.Text = emote.name
+        nameLabel.ZIndex = 8
+        nameLabel.Parent = row
+
+        -- ID label
+        local idLabel = Instance.new("TextLabel")
+        idLabel.Size = UDim2.new(0, 100, 1, 0)
+        idLabel.Position = UDim2.new(1, -108, 0, 0)
+        idLabel.BackgroundTransparency = 1
+        idLabel.TextColor3 = Color3.fromRGB(50, 90, 120)
+        idLabel.Font = Enum.Font.Gotham
+        idLabel.TextSize = 10
+        idLabel.TextXAlignment = Enum.TextXAlignment.Right
+        idLabel.Text = tostring(emote.id)
+        idLabel.ZIndex = 8
+        idLabel.Parent = row
+
+        -- Play button
+        local playBtn = Instance.new("TextButton")
+        playBtn.Size = UDim2.new(0, 52, 0, 26)
+        playBtn.Position = UDim2.new(1, -58, 0.5, -13)
+        playBtn.BackgroundColor3 = Color3.fromRGB(0, 60, 90)
+        playBtn.TextColor3 = Color3.fromRGB(0, 220, 255)
+        playBtn.Font = Enum.Font.GothamBold
+        playBtn.TextSize = 11
+        playBtn.Text = "▶ PLAY"
+        playBtn.ZIndex = 9
+        playBtn.Parent = row
+        makeCorner(playBtn, 4)
+
+        -- Hover
+        row.MouseEnter:Connect(function()
+            if not (selectedEmote and selectedEmote.id == emote.id) then
+                TweenService:Create(row, TweenInfo.new(0.1), {BackgroundColor3 = Color3.fromRGB(14, 28, 44)}):Play()
+            end
+        end)
+        row.MouseLeave:Connect(function()
+            if not (selectedEmote and selectedEmote.id == emote.id) then
+                TweenService:Create(row, TweenInfo.new(0.1), {BackgroundColor3 = Color3.fromRGB(11, 19, 30)}):Play()
+            end
+        end)
+
+        -- Click row = select
+        row.MouseButton1Click:Connect(function()
+            selectedEmote = emote
+            renderPage()
+        end)
+
+        -- Click play = play immediately
+        playBtn.MouseButton1Click:Connect(function()
+            selectedEmote = emote
+            playEmote(emote)
+            renderPage()
+        end)
+    end
+
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 8)
+    scrollFrame.CanvasPosition = Vector2.new(0, 0)
+end
+
+-- ─────────────────────────────────────────
+-- SEARCH
+-- ─────────────────────────────────────────
+local searchDebounce = nil
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    if searchDebounce then task.cancel(searchDebounce) end
+    searchDebounce = task.delay(0.25, function()
+        local query = searchBox.Text:lower():gsub("^%s+",""):gsub("%s+$","")
+        if query == "" then
+            filteredEmotes = allEmotes
+        else
+            filteredEmotes = {}
+            for _, e in ipairs(allEmotes) do
+                if e.name:lower():find(query, 1, true) then
+                    table.insert(filteredEmotes, e)
+                end
+            end
+        end
+        countLabel.Text = #filteredEmotes .. " results"
+        currentPage = 1
+        renderPage()
+    end)
+end)
+
+-- ─────────────────────────────────────────
+-- SPEED CONTROLS
+-- ─────────────────────────────────────────
+local function updateSpeedLabel()
+    speedValLabel.Text = string.format("%.1fx", emoteSpeed)
+end
+
+speedDown.MouseButton1Click:Connect(function()
+    emoteSpeed = math.max(0.1, math.floor((emoteSpeed - 0.1) * 10 + 0.5) / 10)
+    updateSpeedLabel()
+    if currentTrack and currentTrack.IsPlaying then
+        currentTrack:AdjustSpeed(emoteSpeed)
+    end
+end)
+
+speedUp.MouseButton1Click:Connect(function()
+    emoteSpeed = math.min(5.0, math.floor((emoteSpeed + 0.1) * 10 + 0.5) / 10)
+    updateSpeedLabel()
+    if currentTrack and currentTrack.IsPlaying then
+        currentTrack:AdjustSpeed(emoteSpeed)
+    end
+end)
+
+-- ─────────────────────────────────────────
+-- FREEZE & STOP
+-- ─────────────────────────────────────────
+freezeBtn.MouseButton1Click:Connect(function()
+    freezeEnabled = not freezeEnabled
+    if freezeEnabled then
+        freezeBtn.Text = "❄  FREEZE: ON"
+        freezeBtn.BackgroundColor3 = Color3.fromRGB(0, 50, 35)
+        freezeBtn.TextColor3 = Color3.fromRGB(0, 255, 150)
+    else
+        freezeBtn.Text = "❄  FREEZE: OFF"
+        freezeBtn.BackgroundColor3 = Color3.fromRGB(12, 28, 20)
+        freezeBtn.TextColor3 = Color3.fromRGB(0, 210, 120)
+        -- unfreeze now if needed
+        local char = player.Character
+        if char then
+            local hum2 = char:FindFirstChild("Humanoid")
+            if hum2 then
+                hum2.WalkSpeed = 16
+                hum2.JumpPower = 50
+            end
+        end
+    end
+end)
+
+stopBtn.MouseButton1Click:Connect(function()
+    stopCurrentEmote()
+    local char = player.Character
+    if char then
+        local hum2 = char:FindFirstChild("Humanoid")
+        if hum2 then
+            hum2.WalkSpeed = 16
+            hum2.JumpPower = 50
+        end
+    end
+end)
+
+-- ─────────────────────────────────────────
+-- PAGINATION
+-- ─────────────────────────────────────────
+prevBtn.MouseButton1Click:Connect(function()
+    if currentPage > 1 then
+        currentPage = currentPage - 1
+        renderPage()
+    end
+end)
+
+nextBtn.MouseButton1Click:Connect(function()
+    local totalPages = math.ceil(#filteredEmotes / EMOTES_PER_PAGE)
+    if currentPage < totalPages then
+        currentPage = currentPage + 1
+        renderPage()
+    end
+end)
+
+-- ─────────────────────────────────────────
+-- OPEN / CLOSE
+-- ─────────────────────────────────────────
+local function setGuiOpen(open)
+    guiOpen = open
+    mainFrame.Visible = open
+    toggleBtn.Text = open and "✕  CLOSE" or "≡  EMOTES"
+end
+
+toggleBtn.MouseButton1Click:Connect(function()
+    setGuiOpen(not guiOpen)
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+    setGuiOpen(false)
+end)
+
+-- ─────────────────────────────────────────
+-- DRAGGING (title bar)
+-- ─────────────────────────────────────────
+do
+    local dragging = false
+    local dragStart, startPos
+
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = mainFrame.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            mainFrame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+end
+
+-- ─────────────────────────────────────────
+-- LOAD EMOTES FROM GITHUB
+-- ─────────────────────────────────────────
+task.spawn(function()
+    local ok, result = pcall(function()
+        return game:HttpGet("https://raw.githubusercontent.com/7yd7/sniper-Emote/refs/heads/test/EmoteSniper.json")
+    end)
+    if ok and result then
+        local dok, data = pcall(function()
+            return HttpService:JSONDecode(result)
+        end)
+        if dok and data and data.data then
+            allEmotes = data.data
+            filteredEmotes = allEmotes
+            countLabel.Text = #allEmotes .. " emotes"
+            renderPage()
+        else
+            countLabel.Text = "failed to parse"
+        end
+    else
+        countLabel.Text = "failed to load"
+    end
+end)
+
+-- update on character respawn
+player.CharacterAdded:Connect(function(char)
+    character = char
+    humanoid = char:WaitForChild("Humanoid")
+    currentTrack = nil
+end)
